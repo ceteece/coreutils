@@ -364,23 +364,10 @@ impl StatPrinter {
     }
 }
 
-/*
-fn print_stats(
-    stat_printer: StatPrinter,
-    rx: mpsc::Receiver<Stat>,
-    convert_size: Fn(u64) -> String,
-) {
-    loop {
-        let stat = rx.recv();
-
-        match stat {
-            // TODO: actually use depth properly
-            Ok(my_stat) => stat_printer.print(&my_stat, 0, &convert_size).unwrap(),
-            Err(_) => break,
-        }
-    }
+struct StatPrintInfo {
+    stat: Stat,
+    depth: usize,
 }
-*/
 
 // this takes `my_stat` to avoid having to stat files multiple times.
 // XXX: this should use the impl Trait return type when it is stabilized
@@ -391,7 +378,7 @@ fn du(
     depth: usize,
     seen_inodes: &mut HashSet<FileInfo>,
     exclude: &[Pattern],
-    tx: &mpsc::Sender<Stat>,
+    tx: &mpsc::Sender<StatPrintInfo>,
 ) -> UResult<Box<dyn DoubleEndedIterator<Item = Stat>>> {
     let mut stats = vec![];
     let mut futures = vec![];
@@ -403,7 +390,11 @@ fn du(
                 show!(
                     e.map_err_context(|| format!("cannot read directory {}", my_stat.path.quote()))
                 );
-                tx.send(my_stat.clone()).unwrap();
+                tx.send(StatPrintInfo {
+                    stat: my_stat.clone(),
+                    depth,
+                })
+                .unwrap();
                 return Ok(Box::new(iter::once(my_stat)));
             }
         };
@@ -462,7 +453,11 @@ fn du(
                                 my_stat.blocks += this_stat.blocks;
                                 my_stat.inodes += 1;
                                 if options.all {
-                                    tx.send(this_stat.clone()).unwrap();
+                                    tx.send(StatPrintInfo {
+                                        stat: this_stat.clone(),
+                                        depth,
+                                    })
+                                    .unwrap();
                                     stats.push(this_stat);
                                 }
                             }
@@ -488,7 +483,11 @@ fn du(
             .map_or(true, |max_depth| depth < max_depth)
     }));
 
-    tx.send(my_stat.clone()).unwrap();
+    tx.send(StatPrintInfo {
+        stat: my_stat.clone(),
+        depth,
+    })
+    .unwrap();
 
     stats.push(my_stat);
 
@@ -732,7 +731,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         options.clone(),
     );
 
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::channel::<StatPrintInfo>();
 
     let printing_thread = thread::spawn({
         let matchesx = matches.clone();
@@ -748,11 +747,13 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                 }
             };
             loop {
-                let stat = rx.recv();
+                let stat_info = rx.recv();
 
-                match stat {
+                match stat_info {
                     // TODO: actually use depth properly
-                    Ok(my_stat) => stat_printer.print(&my_stat, 0, &convert_size).unwrap(),
+                    Ok(stat_info) => stat_printer
+                        .print(&stat_info.stat, stat_info.depth, &convert_size)
+                        .unwrap(),
                     Err(_) => break,
                 }
             }
