@@ -332,16 +332,16 @@ impl StatPrinter<'_> {
                 .map_or(true, |max_depth| depth <= max_depth)
         {
             if self.matches.contains_id(options::TIME) {
-                let tm = {
-                    let secs = self
-                        .matches
-                        .get_one::<String>(options::TIME)
-                        .map(|s| get_time_secs(s, &stat))
-                        .transpose()?
-                        .unwrap_or(stat.modified);
-                    DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(secs))
-                };
                 if !self.summarize || depth == 0 {
+                    let tm = {
+                        let secs = self
+                            .matches
+                            .get_one::<String>(options::TIME)
+                            .map(|s| get_time_secs(s, &stat))
+                            .transpose()?
+                            .unwrap_or(stat.modified);
+                        DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(secs))
+                    };
                     let time_str = tm.format(self.time_format_str).to_string();
                     print!("{}\t{}\t", (self.convert_size)(size), time_str);
                     print_verbatim(&stat.path).unwrap();
