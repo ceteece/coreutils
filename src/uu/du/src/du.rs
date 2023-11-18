@@ -800,6 +800,8 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         }
     }
 
+    drop(tx);
+
     printing_thread
         .join()
         .expect("Failed to join with printing thread.");
