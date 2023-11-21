@@ -402,49 +402,98 @@ fn du(
     Ok(my_stat)
 }
 
-fn convert_size_human(size: u64, multiplier: u64, _block_size: u64) -> String {
-    for &(unit, power) in &UNITS {
-        let limit = multiplier.pow(power);
-        if size >= limit {
-            return format!("{:.1}{}", (size as f64) / (limit as f64), unit);
+trait SizeConverter {
+    fn convert(&self, size: u64) -> String;
+}
+
+struct SizeConverterHuman {
+    multiplier: u64,
+}
+
+struct SizeConverterB;
+
+struct SizeConverterK {
+    multiplier: u64,
+}
+
+struct SizeConverterM {
+    multiplier: u64,
+}
+
+struct SizeConverterOther {
+    block_size: u64,
+}
+
+struct SizeConverterInodes;
+
+impl SizeConverter for SizeConverterHuman {
+    fn convert(&self, size: u64) -> String {
+        for &(unit, power) in &UNITS {
+            let limit = self.multiplier.pow(power);
+            if size >= limit {
+                return format!("{:.1}{}", (size as f64) / (limit as f64), unit);
+            }
         }
+        if size == 0 {
+            return "0".to_string();
+        }
+        format!("{size}B")
     }
-    if size == 0 {
-        return "0".to_string();
+}
+
+impl SizeConverter for SizeConverterB {
+    fn convert(&self, size: u64) -> String {
+        format!("{}", ((size as f64) / (1_f64)).ceil())
     }
-    format!("{size}B")
 }
 
-fn convert_size_b(size: u64, _multiplier: u64, _block_size: u64) -> String {
-    format!("{}", ((size as f64) / (1_f64)).ceil())
+impl SizeConverter for SizeConverterK {
+    fn convert(&self, size: u64) -> String {
+        format!("{}", ((size as f64) / (self.multiplier as f64)).ceil())
+    }
 }
 
-fn convert_size_k(size: u64, multiplier: u64, _block_size: u64) -> String {
-    format!("{}", ((size as f64) / (multiplier as f64)).ceil())
+impl SizeConverter for SizeConverterM {
+    fn convert(&self, size: u64) -> String {
+        format!(
+            "{}",
+            ((size as f64) / ((self.multiplier * self.multiplier) as f64)).ceil()
+        )
+    }
 }
 
-fn convert_size_m(size: u64, multiplier: u64, _block_size: u64) -> String {
-    format!(
-        "{}",
-        ((size as f64) / ((multiplier * multiplier) as f64)).ceil()
-    )
+impl SizeConverter for SizeConverterOther {
+    fn convert(&self, size: u64) -> String {
+        format!("{}", ((size as f64) / (self.block_size as f64)).ceil())
+    }
 }
 
-fn convert_size_other(size: u64, _multiplier: u64, block_size: u64) -> String {
-    format!("{}", ((size as f64) / (block_size as f64)).ceil())
+impl SizeConverter for SizeConverterInodes {
+    fn convert(&self, size: u64) -> String {
+        size.to_string()
+    }
 }
 
-fn get_convert_size_fn(matches: &ArgMatches) -> Box<dyn Fn(u64, u64, u64) -> String> {
+fn get_size_converter(
+    matches: &ArgMatches,
+    options: &Options,
+    multiplier: u64,
+    block_size: u64,
+) -> Box<dyn SizeConverter + Send> {
+    if options.inodes {
+        return Box::new(SizeConverterInodes {});
+    }
+
     if matches.get_flag(options::HUMAN_READABLE) || matches.get_flag(options::SI) {
-        Box::new(convert_size_human)
+        Box::new(SizeConverterHuman { multiplier })
     } else if matches.get_flag(options::BYTES) {
-        Box::new(convert_size_b)
+        Box::new(SizeConverterB)
     } else if matches.get_flag(options::BLOCK_SIZE_1K) {
-        Box::new(convert_size_k)
+        Box::new(SizeConverterK { multiplier })
     } else if matches.get_flag(options::BLOCK_SIZE_1M) {
-        Box::new(convert_size_m)
+        Box::new(SizeConverterM { multiplier })
     } else {
-        Box::new(convert_size_other)
+        Box::new(SizeConverterOther { block_size })
     }
 }
 
@@ -552,8 +601,7 @@ struct StatPrinter {
     time_format_str: String,
     line_ending: LineEnding,
     options: Options,
-    multiplier: u64,
-    block_size: u64,
+    size_converter: Box<dyn SizeConverter + Send>,
 }
 
 impl StatPrinter {
@@ -563,6 +611,14 @@ impl StatPrinter {
                 .get_one::<String>(options::BLOCK_SIZE)
                 .map(|s| s.as_str()),
         )?;
+
+        let multiplier: u64 = if matches.get_flag(options::SI) {
+            1000
+        } else {
+            1024
+        };
+
+        let size_converter = get_size_converter(&matches, &options, multiplier, block_size);
 
         let threshold = match matches.get_one::<String>(options::THRESHOLD) {
             Some(s) => match Threshold::from_str(s) {
@@ -575,12 +631,6 @@ impl StatPrinter {
                 }
             },
             None => None,
-        };
-
-        let multiplier: u64 = if matches.get_flag(options::SI) {
-            1000
-        } else {
-            1024
         };
 
         let time_format_str =
@@ -596,22 +646,11 @@ impl StatPrinter {
             time_format_str,
             line_ending,
             options,
-            multiplier,
-            block_size,
+            size_converter,
         })
     }
 
     fn print_stats(&self, rx: &mpsc::Receiver<StatPrintInfo>) -> UResult<()> {
-        let convert_size_fn = get_convert_size_fn(&self.matches);
-
-        let convert_size = |size: u64| {
-            if self.options.inodes {
-                size.to_string()
-            } else {
-                convert_size_fn(size, self.multiplier, self.block_size)
-            }
-        };
-
         let mut grand_total = 0;
         loop {
             let stat_info = rx.recv();
@@ -633,24 +672,7 @@ impl StatPrinter {
                             .map_or(true, |max_depth| stat_info.depth <= max_depth)
                         && (!self.summarize || stat_info.depth == 0)
                     {
-                        if self.matches.contains_id(options::TIME) {
-                            let tm = {
-                                let secs = self
-                                    .matches
-                                    .get_one::<String>(options::TIME)
-                                    .map(|s| get_time_secs(s, &stat_info.stat))
-                                    .transpose()?
-                                    .unwrap_or(stat_info.stat.modified);
-                                DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(secs))
-                            };
-                            let time_str = tm.format(&self.time_format_str).to_string();
-                            print!("{}\t{}\t", convert_size(size), time_str);
-                        } else {
-                            print!("{}\t", convert_size(size));
-                        }
-
-                        print_verbatim(&stat_info.stat.path).unwrap();
-                        print!("{}", self.line_ending);
+                        self.print_stat(&stat_info.stat, size)?;
                     }
                 }
                 Err(_) => break,
@@ -658,9 +680,32 @@ impl StatPrinter {
         }
 
         if self.options.total {
-            print!("{}\ttotal", convert_size(grand_total));
+            print!("{}\ttotal", self.size_converter.convert(grand_total));
             print!("{}", self.line_ending);
         }
+
+        Ok(())
+    }
+
+    fn print_stat(&self, stat: &Stat, size: u64) -> UResult<()> {
+        if self.matches.contains_id(options::TIME) {
+            let tm = {
+                let secs = self
+                    .matches
+                    .get_one::<String>(options::TIME)
+                    .map(|s| get_time_secs(s, stat))
+                    .transpose()?
+                    .unwrap_or(stat.modified);
+                DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(secs))
+            };
+            let time_str = tm.format(&self.time_format_str).to_string();
+            print!("{}\t{}\t", self.size_converter.convert(size), time_str);
+        } else {
+            print!("{}\t", self.size_converter.convert(size));
+        }
+
+        print_verbatim(&stat.path).unwrap();
+        print!("{}", self.line_ending);
 
         Ok(())
     }
