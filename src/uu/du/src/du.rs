@@ -313,7 +313,6 @@ fn du(
     current_dir: &mut PathBuf,
 ) -> Result<Stat, Box<mpsc::SendError<UResult<StatPrintInfo>>>> {
     if my_stat.is_dir {
-        current_dir.push(my_stat.path.file_name().unwrap());
         env::set_current_dir(&my_stat.path).unwrap();
 
         let read = match fs::read_dir(".") {
@@ -323,7 +322,6 @@ fn du(
                     format!("cannot read directory {}", my_stat.path.quote())
                 })))?;
                 env::set_current_dir("..").unwrap();
-                current_dir.pop();
                 return Ok(my_stat);
             }
         };
@@ -377,8 +375,10 @@ fn du(
                                     }
                                 }
 
+                                current_dir.push(this_stat.path.file_name().unwrap());
                                 let this_stat =
                                     du(this_stat, options, depth + 1, seen_inodes, print_tx, current_dir)?;
+                                current_dir.pop();
 
                                 if !options.separate_dirs {
                                     my_stat.size += this_stat.size;
@@ -412,7 +412,6 @@ fn du(
             }
         }
         env::set_current_dir("..").unwrap();
-        current_dir.pop();
     }
 
     Ok(my_stat)
@@ -575,7 +574,7 @@ impl StatPrinter {
             print!("{}\t", self.convert_size(size));
         }
 
-        current_dir.push(stat.path.file_name().unwrap());
+        current_dir.push(stat.path.file_name().unwrap_or_default());
         print_verbatim(current_dir).unwrap();
         print!("{}", self.line_ending);
 
@@ -777,9 +776,10 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             if let Some(inode) = stat.inode {
                 seen_inodes.insert(inode);
             }
-            let mut current_dir = PathBuf::new();
+            let mut current_dir = PathBuf::from(&path);
             let stat = du(stat, &traversal_options, 0, &mut seen_inodes, &print_tx, &mut current_dir)
                 .map_err(|e| USimpleError::new(1, e.to_string()))?;
+            current_dir.pop();
 
             print_tx
                 .send(Ok(StatPrintInfo { stat, depth: 0, current_dir: current_dir.clone() }))
