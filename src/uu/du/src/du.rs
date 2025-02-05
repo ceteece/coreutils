@@ -310,14 +310,20 @@ fn du(
     depth: usize,
     seen_inodes: &mut HashSet<FileInfo>,
     print_tx: &mpsc::Sender<UResult<StatPrintInfo>>,
+    current_dir: &mut PathBuf,
 ) -> Result<Stat, Box<mpsc::SendError<UResult<StatPrintInfo>>>> {
     if my_stat.is_dir {
-        let read = match fs::read_dir(&my_stat.path) {
+        current_dir.push(my_stat.path.file_name().unwrap());
+        env::set_current_dir(&my_stat.path).unwrap();
+
+        let read = match fs::read_dir(".") {
             Ok(read) => read,
             Err(e) => {
                 print_tx.send(Err(e.map_err_context(|| {
                     format!("cannot read directory {}", my_stat.path.quote())
                 })))?;
+                env::set_current_dir("..").unwrap();
+                current_dir.pop();
                 return Ok(my_stat);
             }
         };
@@ -372,7 +378,7 @@ fn du(
                                 }
 
                                 let this_stat =
-                                    du(this_stat, options, depth + 1, seen_inodes, print_tx)?;
+                                    du(this_stat, options, depth + 1, seen_inodes, print_tx, current_dir)?;
 
                                 if !options.separate_dirs {
                                     my_stat.size += this_stat.size;
@@ -382,6 +388,7 @@ fn du(
                                 print_tx.send(Ok(StatPrintInfo {
                                     stat: this_stat,
                                     depth: depth + 1,
+                                    current_dir: current_dir.clone(),
                                 }))?;
                             } else {
                                 my_stat.size += this_stat.size;
@@ -391,6 +398,7 @@ fn du(
                                     print_tx.send(Ok(StatPrintInfo {
                                         stat: this_stat,
                                         depth: depth + 1,
+                                        current_dir: current_dir.clone(),
                                     }))?;
                                 }
                             }
@@ -403,6 +411,8 @@ fn du(
                 Err(error) => print_tx.send(Err(error.into()))?,
             }
         }
+        env::set_current_dir("..").unwrap();
+        current_dir.pop();
     }
 
     Ok(my_stat)
@@ -479,6 +489,7 @@ fn build_exclude_patterns(matches: &ArgMatches) -> UResult<Vec<Pattern>> {
 struct StatPrintInfo {
     stat: Stat,
     depth: usize,
+    current_dir: PathBuf,
 }
 
 impl StatPrinter {
@@ -501,7 +512,7 @@ impl StatPrinter {
 
             match received {
                 Ok(message) => match message {
-                    Ok(stat_info) => {
+                    Ok(mut stat_info) => {
                         let size = self.choose_size(&stat_info.stat);
 
                         if stat_info.depth == 0 {
@@ -516,7 +527,7 @@ impl StatPrinter {
                                 .map_or(true, |max_depth| stat_info.depth <= max_depth)
                             && (!self.summarize || stat_info.depth == 0)
                         {
-                            self.print_stat(&stat_info.stat, size)?;
+                            self.print_stat(&stat_info.stat, size, &mut stat_info.current_dir)?;
                         }
                     }
                     Err(e) => show!(e),
@@ -554,7 +565,7 @@ impl StatPrinter {
         }
     }
 
-    fn print_stat(&self, stat: &Stat, size: u64) -> UResult<()> {
+    fn print_stat(&self, stat: &Stat, size: u64, current_dir: &mut PathBuf) -> UResult<()> {
         if let Some(time) = self.time {
             let secs = get_time_secs(time, stat)?;
             let tm = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(secs));
@@ -564,7 +575,8 @@ impl StatPrinter {
             print!("{}\t", self.convert_size(size));
         }
 
-        print_verbatim(&stat.path).unwrap();
+        current_dir.push(stat.path.file_name().unwrap());
+        print_verbatim(current_dir).unwrap();
         print!("{}", self.line_ending);
 
         Ok(())
@@ -765,11 +777,13 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             if let Some(inode) = stat.inode {
                 seen_inodes.insert(inode);
             }
-            let stat = du(stat, &traversal_options, 0, &mut seen_inodes, &print_tx)
+            let mut current_dir = PathBuf::new();
+            let stat = du(stat, &traversal_options, 0, &mut seen_inodes, &print_tx, &mut current_dir)
                 .map_err(|e| USimpleError::new(1, e.to_string()))?;
 
             print_tx
-                .send(Ok(StatPrintInfo { stat, depth: 0 }))
+                .send(Ok(StatPrintInfo { stat, depth: 0, current_dir: current_dir.clone() }))
+                                    
                 .map_err(|e| USimpleError::new(1, e.to_string()))?;
         } else {
             print_tx
