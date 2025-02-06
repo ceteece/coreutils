@@ -311,113 +311,112 @@ fn du(
     seen_inodes: &mut HashSet<FileInfo>,
     print_tx: &mpsc::Sender<UResult<StatPrintInfo>>,
     current_dir: &mut PathBuf,
-) -> Result<Stat, Box<mpsc::SendError<UResult<StatPrintInfo>>>> {
-    if my_stat.is_dir {
-        env::set_current_dir(&my_stat.path).unwrap();
+    parent_stat: Option<&mut Stat>,
+) -> Result<(), Box<mpsc::SendError<UResult<StatPrintInfo>>>> {
+    let read = match fs::read_dir(".") {
+        Ok(read) => read,
+        Err(e) => {
+            print_tx.send(Err(e.map_err_context(|| {
+                format!("cannot read directory {}", current_dir.quote())
+            })))?;
+            return Ok(());
+        }
+    };
 
-        let read = match fs::read_dir(".") {
-            Ok(read) => read,
-            Err(e) => {
-                print_tx.send(Err(e.map_err_context(|| {
-                    format!("cannot read directory {}", current_dir.quote())
-                })))?;
-                env::set_current_dir("..").unwrap();
-                return Ok(my_stat);
-            }
-        };
+    'file_loop: for f in read {
+        match f {
+            Ok(entry) => {
+                let mut full_path = current_dir.clone();
+                full_path.push(&entry.path().file_name().unwrap_or_default());
 
-        'file_loop: for f in read {
-            match f {
-                Ok(entry) => {
-                    let mut full_path = current_dir.clone();
-                    full_path.push(&entry.path().file_name().unwrap_or_default());
+                match Stat::new(&entry.path(), Some(&entry), options) {
+                    Ok(this_stat) => {
+                        // We have an exclude list
+                        for pattern in &options.excludes {
+                            // Look at all patterns with both short and long paths
+                            // if we have 'du foo' but search to exclude 'foo/bar'
+                            // we need the full path
+                            if pattern.matches(&full_path.to_string_lossy())
+                                || pattern.matches(&entry.file_name().into_string().unwrap())
+                            {
+                                // if the directory is ignored, leave early
+                                if options.verbose {
+                                    println!("{} ignored", &full_path.quote());
+                                }
+                                // Go to the next file
+                                continue 'file_loop;
+                            }
+                        }
 
-                    match Stat::new(&entry.path(), Some(&entry), options) {
-                        Ok(this_stat) => {
-                            // We have an exclude list
-                            for pattern in &options.excludes {
-                                // Look at all patterns with both short and long paths
-                                // if we have 'du foo' but search to exclude 'foo/bar'
-                                // we need the full path
-                                if pattern.matches(&full_path.to_string_lossy())
-                                    || pattern.matches(&entry.file_name().into_string().unwrap())
+                        if let Some(inode) = this_stat.inode {
+                            // Check if the inode has been seen before and if we should skip it
+                            if seen_inodes.contains(&inode)
+                                && (!options.count_links || !options.all)
+                            {
+                                // If `count_links` is enabled and `all` is not, increment the inode count
+                                if options.count_links && !options.all {
+                                    my_stat.inodes += 1;
+                                }
+                                // Skip further processing for this inode
+                                continue;
+                            }
+                            // Mark this inode as seen
+                            seen_inodes.insert(inode);
+                        }
+
+                        if this_stat.is_dir {
+                            if options.one_file_system {
+                                if let (Some(this_inode), Some(my_inode)) =
+                                    (this_stat.inode, my_stat.inode)
                                 {
-                                    // if the directory is ignored, leave early
-                                    if options.verbose {
-                                        println!("{} ignored", &full_path.quote());
+                                    if this_inode.dev_id != my_inode.dev_id {
+                                        continue;
                                     }
-                                    // Go to the next file
-                                    continue 'file_loop;
                                 }
                             }
 
-                            if let Some(inode) = this_stat.inode {
-                                // Check if the inode has been seen before and if we should skip it
-                                if seen_inodes.contains(&inode)
-                                    && (!options.count_links || !options.all)
-                                {
-                                    // If `count_links` is enabled and `all` is not, increment the inode count
-                                    if options.count_links && !options.all {
-                                        my_stat.inodes += 1;
-                                    }
-                                    // Skip further processing for this inode
-                                    continue;
-                                }
-                                // Mark this inode as seen
-                                seen_inodes.insert(inode);
-                            }
-
-                            if this_stat.is_dir {
-                                if options.one_file_system {
-                                    if let (Some(this_inode), Some(my_inode)) =
-                                        (this_stat.inode, my_stat.inode)
-                                    {
-                                        if this_inode.dev_id != my_inode.dev_id {
-                                            continue;
-                                        }
-                                    }
-                                }
-
-                                current_dir.push(this_stat.path.file_name().unwrap());
-                                let this_stat =
-                                    du(this_stat, options, depth + 1, seen_inodes, print_tx, current_dir)?;
-                                current_dir.pop();
-
-                                if !options.separate_dirs {
-                                    my_stat.size += this_stat.size;
-                                    my_stat.blocks += this_stat.blocks;
-                                    my_stat.inodes += this_stat.inodes;
-                                }
+                            env::set_current_dir(&this_stat.path).unwrap();
+                            current_dir.push(this_stat.path.file_name().unwrap());
+                            du(this_stat, options, depth + 1, seen_inodes, print_tx, current_dir, Some(&mut my_stat))?;
+                            env::set_current_dir("..").unwrap();
+                            current_dir.pop();
+                        } else {
+                            my_stat.size += this_stat.size;
+                            my_stat.blocks += this_stat.blocks;
+                            my_stat.inodes += 1;
+                            if options.all {
                                 print_tx.send(Ok(StatPrintInfo {
                                     stat: this_stat,
                                     depth: depth + 1,
                                     full_path: full_path,
                                 }))?;
-                            } else {
-                                my_stat.size += this_stat.size;
-                                my_stat.blocks += this_stat.blocks;
-                                my_stat.inodes += 1;
-                                if options.all {
-                                    print_tx.send(Ok(StatPrintInfo {
-                                        stat: this_stat,
-                                        depth: depth + 1,
-                                        full_path: full_path,
-                                    }))?;
-                                }
                             }
                         }
-                        Err(e) => print_tx.send(Err(e.map_err_context(|| {
-                            format!("cannot access {}", full_path.quote())
-                        })))?,
                     }
+                    Err(e) => print_tx.send(Err(e.map_err_context(|| {
+                        format!("cannot access {}", full_path.quote())
+                    })))?,
                 }
-                Err(error) => print_tx.send(Err(error.into()))?,
             }
+            Err(error) => print_tx.send(Err(error.into()))?,
         }
-        env::set_current_dir("..").unwrap();
     }
 
-    Ok(my_stat)
+    if let Some(parent_stat) = parent_stat {
+        if !options.separate_dirs {
+            parent_stat.size += my_stat.size;
+            parent_stat.blocks += my_stat.blocks;
+            parent_stat.inodes += my_stat.inodes;
+        }
+    }
+
+    print_tx.send(Ok(StatPrintInfo {
+        stat: my_stat,
+        depth: depth + 1,
+        full_path: current_dir.clone(),
+    }))?;
+
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -773,19 +772,25 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
         // Check existence of path provided in argument
         if let Ok(stat) = Stat::new(&path, None, &traversal_options) {
-            // Kick off the computation of disk usage from the initial path
-            let mut seen_inodes: HashSet<FileInfo> = HashSet::new();
-            if let Some(inode) = stat.inode {
-                seen_inodes.insert(inode);
-            }
-            let mut current_dir = PathBuf::from(&path);
-            let stat = du(stat, &traversal_options, 0, &mut seen_inodes, &print_tx, &mut current_dir)
-                .map_err(|e| USimpleError::new(1, e.to_string()))?;
+            if stat.is_dir {
+                // Kick off the computation of disk usage from the initial path
+                let mut seen_inodes: HashSet<FileInfo> = HashSet::new();
+                if let Some(inode) = stat.inode {
+                    seen_inodes.insert(inode);
+                }
+                let mut current_dir = PathBuf::from(&path);
+                env::set_current_dir(&path).unwrap();
+                du(stat, &traversal_options, 0, &mut seen_inodes, &print_tx, &mut current_dir, None)
+                    .map_err(|e| USimpleError::new(1, e.to_string()))?;
 
-            print_tx
-                .send(Ok(StatPrintInfo { stat, depth: 0, full_path: current_dir }))
-                                    
-                .map_err(|e| USimpleError::new(1, e.to_string()))?;
+                // TODO: need to make sure we end up back in original directory in case we have multiple files input
+                //   this won't take us back to original directory if we get a path like `somedir/subdir/`
+                env::set_current_dir("..").unwrap();
+            } else {
+                print_tx
+                    .send(Ok(StatPrintInfo { stat, depth: 0, full_path: path }))
+                    .map_err(|e| USimpleError::new(1, e.to_string()))?;
+            }
         } else {
             print_tx
                 .send(Err(USimpleError::new(
