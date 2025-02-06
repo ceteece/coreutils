@@ -412,7 +412,7 @@ fn du(
 
     print_tx.send(Ok(StatPrintInfo {
         stat: my_stat,
-        depth: depth + 1,
+        depth: depth,
         full_path: current_dir.clone(),
     }))?;
 
