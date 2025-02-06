@@ -329,6 +329,8 @@ fn du(
         'file_loop: for f in read {
             match f {
                 Ok(entry) => {
+                    let mut full_path = current_dir.clone();
+                    full_path.push(&entry.path().file_name().unwrap_or_default());
                     match Stat::new(&entry.path(), Some(&entry), options) {
                         Ok(this_stat) => {
                             // We have an exclude list
@@ -388,7 +390,7 @@ fn du(
                                 print_tx.send(Ok(StatPrintInfo {
                                     stat: this_stat,
                                     depth: depth + 1,
-                                    current_dir: current_dir.clone(),
+                                    full_path: full_path,
                                 }))?;
                             } else {
                                 my_stat.size += this_stat.size;
@@ -398,7 +400,7 @@ fn du(
                                     print_tx.send(Ok(StatPrintInfo {
                                         stat: this_stat,
                                         depth: depth + 1,
-                                        current_dir: current_dir.clone(),
+                                        full_path: full_path,
                                     }))?;
                                 }
                             }
@@ -488,7 +490,7 @@ fn build_exclude_patterns(matches: &ArgMatches) -> UResult<Vec<Pattern>> {
 struct StatPrintInfo {
     stat: Stat,
     depth: usize,
-    current_dir: PathBuf,
+    full_path: PathBuf,
 }
 
 impl StatPrinter {
@@ -511,7 +513,7 @@ impl StatPrinter {
 
             match received {
                 Ok(message) => match message {
-                    Ok(mut stat_info) => {
+                    Ok(stat_info) => {
                         let size = self.choose_size(&stat_info.stat);
 
                         if stat_info.depth == 0 {
@@ -526,7 +528,7 @@ impl StatPrinter {
                                 .map_or(true, |max_depth| stat_info.depth <= max_depth)
                             && (!self.summarize || stat_info.depth == 0)
                         {
-                            self.print_stat(&stat_info.stat, size, &mut stat_info.current_dir)?;
+                            self.print_stat(&stat_info.stat, size, &stat_info.full_path)?;
                         }
                     }
                     Err(e) => show!(e),
@@ -564,7 +566,7 @@ impl StatPrinter {
         }
     }
 
-    fn print_stat(&self, stat: &Stat, size: u64, current_dir: &mut PathBuf) -> UResult<()> {
+    fn print_stat(&self, stat: &Stat, size: u64, full_path: &PathBuf) -> UResult<()> {
         if let Some(time) = self.time {
             let secs = get_time_secs(time, stat)?;
             let tm = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(secs));
@@ -574,8 +576,7 @@ impl StatPrinter {
             print!("{}\t", self.convert_size(size));
         }
 
-        current_dir.push(stat.path.file_name().unwrap_or_default());
-        print_verbatim(current_dir).unwrap();
+        print_verbatim(full_path).unwrap();
         print!("{}", self.line_ending);
 
         Ok(())
@@ -779,10 +780,13 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             let mut current_dir = PathBuf::from(&path);
             let stat = du(stat, &traversal_options, 0, &mut seen_inodes, &print_tx, &mut current_dir)
                 .map_err(|e| USimpleError::new(1, e.to_string()))?;
-            current_dir.pop();
+
+            //if current_dir.as_os_str().is_empty() {
+            //    current_dir.push(".");
+            //}
 
             print_tx
-                .send(Ok(StatPrintInfo { stat, depth: 0, current_dir: current_dir.clone() }))
+                .send(Ok(StatPrintInfo { stat, depth: 0, full_path: current_dir }))
                                     
                 .map_err(|e| USimpleError::new(1, e.to_string()))?;
         } else {
