@@ -331,6 +331,7 @@ fn du(
                 Ok(entry) => {
                     let mut full_path = current_dir.clone();
                     full_path.push(&entry.path().file_name().unwrap_or_default());
+
                     match Stat::new(&entry.path(), Some(&entry), options) {
                         Ok(this_stat) => {
                             // We have an exclude list
@@ -338,12 +339,12 @@ fn du(
                                 // Look at all patterns with both short and long paths
                                 // if we have 'du foo' but search to exclude 'foo/bar'
                                 // we need the full path
-                                if pattern.matches(&this_stat.path.to_string_lossy())
+                                if pattern.matches(&full_path.to_string_lossy())
                                     || pattern.matches(&entry.file_name().into_string().unwrap())
                                 {
                                     // if the directory is ignored, leave early
                                     if options.verbose {
-                                        println!("{} ignored", &this_stat.path.quote());
+                                        println!("{} ignored", &full_path.quote());
                                     }
                                     // Go to the next file
                                     continue 'file_loop;
@@ -780,10 +781,6 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             let mut current_dir = PathBuf::from(&path);
             let stat = du(stat, &traversal_options, 0, &mut seen_inodes, &print_tx, &mut current_dir)
                 .map_err(|e| USimpleError::new(1, e.to_string()))?;
-
-            //if current_dir.as_os_str().is_empty() {
-            //    current_dir.push(".");
-            //}
 
             print_tx
                 .send(Ok(StatPrintInfo { stat, depth: 0, full_path: current_dir }))
