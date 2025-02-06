@@ -319,7 +319,7 @@ fn du(
             Ok(read) => read,
             Err(e) => {
                 print_tx.send(Err(e.map_err_context(|| {
-                    format!("cannot read directory {}", my_stat.path.quote())
+                    format!("cannot read directory {}", current_dir.quote())
                 })))?;
                 env::set_current_dir("..").unwrap();
                 return Ok(my_stat);
@@ -407,7 +407,7 @@ fn du(
                             }
                         }
                         Err(e) => print_tx.send(Err(e.map_err_context(|| {
-                            format!("cannot access {}", entry.path().quote())
+                            format!("cannot access {}", full_path.quote())
                         })))?,
                     }
                 }
