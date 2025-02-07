@@ -312,13 +312,30 @@ fn du(
     print_tx: &mpsc::Sender<UResult<StatPrintInfo>>,
     current_dir: &mut PathBuf,
     parent_stat: Option<&mut Stat>,
-) -> Result<(), Box<mpsc::SendError<UResult<StatPrintInfo>>>> {
+) -> Result<(), Box<dyn std::error::Error>> {
+    env::set_current_dir(&my_stat.path).unwrap();
+    let mut n_components = 0;
+    for component in my_stat.path.components() {
+        if component == std::path::Component::CurDir {
+            continue;
+        }
+
+        n_components += 1;
+        current_dir.push(component);
+    }
+
     let read = match fs::read_dir(".") {
         Ok(read) => read,
         Err(e) => {
             print_tx.send(Err(e.map_err_context(|| {
                 format!("cannot read directory {}", current_dir.quote())
             })))?;
+
+            for _ in 0..n_components {
+                env::set_current_dir("..").unwrap();
+                current_dir.pop();
+            }
+
             return Ok(());
         }
     };
@@ -375,11 +392,7 @@ fn du(
                                 }
                             }
 
-                            env::set_current_dir(&this_stat.path).unwrap();
-                            current_dir.push(this_stat.path.file_name().unwrap());
                             du(this_stat, options, depth + 1, seen_inodes, print_tx, current_dir, Some(&mut my_stat))?;
-                            env::set_current_dir("..").unwrap();
-                            current_dir.pop();
                         } else {
                             my_stat.size += this_stat.size;
                             my_stat.blocks += this_stat.blocks;
@@ -415,6 +428,11 @@ fn du(
         depth: depth,
         full_path: current_dir.clone(),
     }))?;
+
+    for _ in 0..n_components {
+        env::set_current_dir("..").unwrap();
+        current_dir.pop();
+    }
 
     Ok(())
 }
@@ -778,14 +796,16 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                 if let Some(inode) = stat.inode {
                     seen_inodes.insert(inode);
                 }
-                let mut current_dir = PathBuf::from(&path);
-                env::set_current_dir(&path).unwrap();
+
+                let mut current_dir = PathBuf::new();
+                match path.components().next() {
+                    Some(c) if c == std::path::Component::CurDir => current_dir.push(c),
+                    None => current_dir.push(std::path::Component::CurDir),
+                    _ => (),
+                };
+
                 du(stat, &traversal_options, 0, &mut seen_inodes, &print_tx, &mut current_dir, None)
                     .map_err(|e| USimpleError::new(1, e.to_string()))?;
-
-                // TODO: need to make sure we end up back in original directory in case we have multiple files input
-                //   this won't take us back to original directory if we get a path like `somedir/subdir/`
-                env::set_current_dir("..").unwrap();
             } else {
                 print_tx
                     .send(Ok(StatPrintInfo { stat, depth: 0, full_path: path }))
