@@ -332,7 +332,7 @@ fn du(
             })))?;
 
             for _ in 0..n_components {
-                env::set_current_dir("..").unwrap();
+                env::set_current_dir(std::path::Component::ParentDir).unwrap();
                 current_dir.pop();
             }
 
@@ -430,7 +430,7 @@ fn du(
     }))?;
 
     for _ in 0..n_components {
-        env::set_current_dir("..").unwrap();
+        env::set_current_dir(std::path::Component::ParentDir).unwrap();
         current_dir.pop();
     }
 
