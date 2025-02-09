@@ -311,8 +311,11 @@ fn du(
     seen_inodes: &mut HashSet<FileInfo>,
     print_tx: &mpsc::Sender<UResult<StatPrintInfo>>,
     current_dir: &mut PathBuf,
+    dir_stack: &mut Vec<PathBuf>,
     parent_stat: Option<&mut Stat>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    //println!("going down");
+
     if let Err(e) = env::set_current_dir(&my_stat.path) {
         print_tx.send(Err(e.map_err_context(|| {
             format!("cannot enter directory {} from directory {}", my_stat.path.quote(), current_dir.quote())
@@ -322,13 +325,26 @@ fn du(
     }
 
     let mut n_components = 0;
+    let mut stack_element = PathBuf::new();
     for component in my_stat.path.components() {
         if component == std::path::Component::CurDir {
             continue;
         }
-
         n_components += 1;
         current_dir.push(component);
+        stack_element.push(component);
+    }
+
+    //let mut push = true;
+    //match &my_stat.path.components().next() {
+    //    Some(c) if c == std::path::Component::CurDir => current_dir.push(c),
+    //    None => current_dir.push(std::path::Component::CurDir),
+    //    _ => (),
+    //};
+
+    if n_components > 0 {
+        //println!("pushing {}", stack_element.display());
+        dir_stack.push(stack_element);
     }
 
     let read = match fs::read_dir(".") {
@@ -339,9 +355,14 @@ fn du(
             })))?;
 
             for _ in 0..n_components {
-                env::set_current_dir(std::path::Component::ParentDir)?;
                 current_dir.pop();
             }
+
+            dir_stack.pop();
+            for dir in &mut *dir_stack {
+                //println!("{}", dir.display());
+                env::set_current_dir(dir)?;
+            };
 
             return Ok(());
         }
@@ -399,7 +420,7 @@ fn du(
                                 }
                             }
 
-                            du(this_stat, options, depth + 1, seen_inodes, print_tx, current_dir, Some(&mut my_stat))?;
+                            du(this_stat, options, depth + 1, seen_inodes, print_tx, current_dir, dir_stack, Some(&mut my_stat))?;
                         } else {
                             my_stat.size += this_stat.size;
                             my_stat.blocks += this_stat.blocks;
@@ -437,9 +458,16 @@ fn du(
     }))?;
 
     for _ in 0..n_components {
-        env::set_current_dir(std::path::Component::ParentDir)?;
         current_dir.pop();
     }
+
+    dir_stack.pop();
+    //println!("going up");
+    for dir in &mut *dir_stack {
+        //print!("{}/", dir.display());
+        env::set_current_dir(dir)?;
+    };
+    //println!();
 
     Ok(())
 }
@@ -811,7 +839,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                     _ => (),
                 };
 
-                du(stat, &traversal_options, 0, &mut seen_inodes, &print_tx, &mut current_dir, None)
+                let mut dir_stack = Vec::new();
+                dir_stack.push(env::current_dir().unwrap());
+                du(stat, &traversal_options, 0, &mut seen_inodes, &print_tx, &mut current_dir, &mut dir_stack, None)
                     .map_err(|e| USimpleError::new(1, e.to_string()))?;
             } else {
                 print_tx
