@@ -313,6 +313,14 @@ fn du(
     current_dir: &mut PathBuf,
     parent_stat: Option<&mut Stat>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if let Err(e) = env::set_current_dir(&my_stat.path) {
+        print_tx.send(Err(e.map_err_context(|| {
+            format!("cannot enter directory {} from directory {}", my_stat.path.quote(), current_dir.quote())
+        })))?;
+
+        return Ok(());
+    }
+
     let mut n_components = 0;
     for component in my_stat.path.components() {
         if component == std::path::Component::CurDir {
@@ -321,18 +329,6 @@ fn du(
 
         n_components += 1;
         current_dir.push(component);
-    }
-
-    if let Err(e) = env::set_current_dir(&my_stat.path) {
-        print_tx.send(Err(e.map_err_context(|| {
-            format!("cannot enter directory {}", current_dir.quote())
-        })))?;
-
-        for _ in 0..n_components {
-            current_dir.pop();
-        }
-
-        return Ok(());
     }
 
     let read = match fs::read_dir(".") {
