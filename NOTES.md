@@ -63,6 +63,20 @@
     - we'd have to either assume the absolute path of the directory we start in is within path max, or cd into incrementally starting from the root?
     - to minimize potential issues, we should avoid changing directories during dfs unless we absolutely have to, so then ideally we just won't need to change back to our starting directory
 
+- next steps:
+  - test if `set_current_dir` works with directories exceeding max path length
+    - nope, it errors out
+  - remove unwraps, add proper error handling
+  - add test to ensure we end up back in right place if use an absolute path followed by a relative path
+    - maybe the test should explicitly confirm we end up back in the original directory?
+  - add logic to ensure we end up back in the directory we started with even when using an absolute path
+  - add tests for directories exceeding max path length?
+    - one for relative path, one for absolute path
+  - add test where first target path has multiple components, followed by a path with only one component
+  - add test to ensure output when we have an inaccessible directory actually matches GNU output
+  - add logic to only change directories when absolutely needed due to file path being too long
+    - ask in Discord how to handle the fact that the InvalidFilename error kind isn't stable yet
+
 TODO:
 - clean up unwraps and panics
   - proper error handling if we fail to change directories
