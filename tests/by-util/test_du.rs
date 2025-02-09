@@ -1252,3 +1252,30 @@ fn test_du_no_deduplicated_input_args() {
         .collect();
     assert_eq!(result_seq, ["2\td", "2\td", "2\td"]);
 }
+
+#[test]
+fn test_du_multiple_args_parent_path() {
+    let ts = TestScenario::new(util_name!());
+    let at = &ts.fixtures;
+
+    at.mkdir("a");
+    at.mkdir("a/b");
+    at.mkdir("c");
+    at.touch("a/b/file1");
+    at.touch("c/file2");
+    at.chdir("a");
+
+    let result = ts
+        .ucmd()
+        .arg("../c")
+        .arg("b")
+        .succeeds();
+    result.no_stderr();
+
+    let result_seq: Vec<String> = result
+        .stdout_str()
+        .lines()
+        .map(|x| x.parse().unwrap())
+        .collect();
+    assert_eq!(result_seq, ["4\t../c", "4\tb"]);
+}

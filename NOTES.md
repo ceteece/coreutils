@@ -67,15 +67,24 @@
   - test if `set_current_dir` works with directories exceeding max path length
     - nope, it errors out
   - remove unwraps, add proper error handling
+    - okay, got this done, might want to clean it up a bit later though
   - add test to ensure we end up back in right place if use an absolute path followed by a relative path
     - maybe the test should explicitly confirm we end up back in the original directory?
   - add logic to ensure we end up back in the directory we started with even when using an absolute path
   - add tests for directories exceeding max path length?
     - one for relative path, one for absolute path
   - add test where first target path has multiple components, followed by a path with only one component
+  - add test for path that starts with some amount of `".."` (parent directory) component(s)
   - add test to ensure output when we have an inaccessible directory actually matches GNU output
+    - seems like this already exists
   - add logic to only change directories when absolutely needed due to file path being too long
     - ask in Discord how to handle the fact that the InvalidFilename error kind isn't stable yet
+ 
+- ahhh, we have another potential snag: what if the user provides a relative path but includes `".."` (parent directory) components?
+  - my idea of just changing directories to parent directories to go back up the stack won't work in this case
+  - ooh okay, I think I have an idea:
+    - have stack of pathbuf objects containing the absolute path, put a new element in the stack every time we hit an error for the path being too long
+        - and we can maybe use a similar mechanism for handling absolute paths and returning back to starting directory
 
 TODO:
 - clean up unwraps and panics
