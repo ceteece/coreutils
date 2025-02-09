@@ -964,12 +964,6 @@ impl AtPath {
         fs::create_dir_all(self.plus(dir)).unwrap();
     }
 
-    pub fn chdir<P: AsRef<Path>>(&self, dir: P) {
-        let dir = dir.as_ref();
-        log_info("chdir", self.plus_as_string(dir));
-        env::set_current_dir(self.plus(dir)).unwrap();
-    }
-
     pub fn make_file(&self, name: &str) -> File {
         match File::create(self.plus(name)) {
             Ok(f) => f,

@@ -314,8 +314,6 @@ fn du(
     dir_stack: &mut Vec<PathBuf>,
     parent_stat: Option<&mut Stat>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    //println!("going down");
-
     if let Err(e) = env::set_current_dir(&my_stat.path) {
         print_tx.send(Err(e.map_err_context(|| {
             format!("cannot enter directory {} from directory {}", my_stat.path.quote(), current_dir.quote())
@@ -335,15 +333,7 @@ fn du(
         stack_element.push(component);
     }
 
-    //let mut push = true;
-    //match &my_stat.path.components().next() {
-    //    Some(c) if c == std::path::Component::CurDir => current_dir.push(c),
-    //    None => current_dir.push(std::path::Component::CurDir),
-    //    _ => (),
-    //};
-
     if n_components > 0 {
-        //println!("pushing {}", stack_element.display());
         dir_stack.push(stack_element);
     }
 
@@ -360,7 +350,6 @@ fn du(
 
             dir_stack.pop();
             for dir in &mut *dir_stack {
-                //println!("{}", dir.display());
                 env::set_current_dir(dir)?;
             };
 
@@ -462,12 +451,9 @@ fn du(
     }
 
     dir_stack.pop();
-    //println!("going up");
     for dir in &mut *dir_stack {
-        //print!("{}/", dir.display());
         env::set_current_dir(dir)?;
     };
-    //println!();
 
     Ok(())
 }

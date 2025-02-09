@@ -1263,10 +1263,10 @@ fn test_du_multiple_args_parent_path() {
     at.mkdir("c");
     at.touch("a/b/file1");
     at.touch("c/file2");
-    at.chdir("a");
 
     let result = ts
         .ucmd()
+        .current_dir("a")
         .arg("../c")
         .arg("b")
         .succeeds();
