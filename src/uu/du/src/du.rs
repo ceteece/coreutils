@@ -1,3 +1,4 @@
+#![feature(io_error_more)]
 // This file is part of the uutils coreutils package.
 //
 // For the full copyright and license information, please view the LICENSE
@@ -317,8 +318,7 @@ fn du(
 
     let read = match fs::read_dir(&my_stat.path) {
         Ok(read) => read,
-        // TODO: this error should be ErrorKind::InvalidFilename, just leaving ErrorKind::Other here for now so I can compile
-        Err(e) if e.kind() == std::io::ErrorKind::Other => {
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidFilename => {
             let parent_path = match my_stat.path.parent() {
                 Some(path) => path.to_owned(),
                 None => PathBuf::from("."),
