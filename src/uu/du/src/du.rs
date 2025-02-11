@@ -310,48 +310,55 @@ fn du(
     depth: usize,
     seen_inodes: &mut HashSet<FileInfo>,
     print_tx: &mpsc::Sender<UResult<StatPrintInfo>>,
-    current_dir: &mut PathBuf,
-    dir_stack: &mut Vec<PathBuf>,
+    current_dir: &mut Vec<PathBuf>,
     parent_stat: Option<&mut Stat>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if let Err(e) = env::set_current_dir(&my_stat.path) {
-        print_tx.send(Err(e.map_err_context(|| {
-            format!("cannot enter directory {} from directory {}", my_stat.path.quote(), current_dir.quote())
-        })))?;
+    let mut changed_dir = false;
 
-        return Ok(());
-    }
-
-    let mut n_components = 0;
-    let mut stack_element = PathBuf::new();
-    for component in my_stat.path.components() {
-        if component == std::path::Component::CurDir {
-            continue;
-        }
-        n_components += 1;
-        current_dir.push(component);
-        stack_element.push(component);
-    }
-
-    if n_components > 0 {
-        dir_stack.push(stack_element);
-    }
-
-    let read = match fs::read_dir(".") {
+    let read = match fs::read_dir(&my_stat.path) {
         Ok(read) => read,
-        Err(e) => {
-            print_tx.send(Err(e.map_err_context(|| {
-                format!("cannot read directory {}", current_dir.quote())
-            })))?;
+        // TODO: this error should be ErrorKind::InvalidFilename, just leaving ErrorKind::Other here for now so I can compile
+        Err(e) if e.kind() == std::io::ErrorKind::Other => {
+            let parent_path = match my_stat.path.parent() {
+                Some(path) => path.to_owned(),
+                None => PathBuf::from("."),
+            };
 
-            for _ in 0..n_components {
-                current_dir.pop();
+            if let Err(e) = env::set_current_dir(&parent_path) {
+                // TODO: make this error message use full parent path (i.e. accounting for current directory being different from origin directory)
+                print_tx.send(Err(e.map_err_context(|| {
+                    format!("cannot enter directory {}", parent_path.quote())
+                })))?;
+
+                return Ok(());
             }
 
-            dir_stack.pop();
-            for dir in &mut *dir_stack {
-                env::set_current_dir(dir)?;
+            let read = match fs::read_dir(my_stat.path.file_name().unwrap()) {
+                Ok(read) => read,
+                Err(e) => {
+                    print_tx.send(Err(e.map_err_context(|| {
+                        format!("cannot read directory {}", my_stat.path.quote())
+                    })))?;
+
+                    // since we still failed to read the directory after changing directory to parent directory,
+                    //   go back up to previous directory
+                    for path_chunk in current_dir {
+                        env::set_current_dir(path_chunk)?;
+                    }
+
+                    return Ok(());
+                },
             };
+
+            changed_dir = true;
+            current_dir.push(parent_path);
+            read
+        },
+        Err(e) => {
+            // TODO: need to actually include full path in the error
+            print_tx.send(Err(e.map_err_context(|| {
+                format!("cannot read directory {}", my_stat.path.quote())
+            })))?;
 
             return Ok(());
         }
@@ -360,8 +367,14 @@ fn du(
     'file_loop: for f in read {
         match f {
             Ok(entry) => {
-                let mut full_path = current_dir.clone();
-                full_path.push(&entry.path().file_name().unwrap_or_default());
+                let mut full_path = PathBuf::new();
+                let mut path_chunks = current_dir.iter();
+                // skip first component, (i.e. don't include base directory in the name)
+                path_chunks.next();
+                for c in path_chunks {
+                    full_path.push(c);
+                }
+                full_path.push(&entry.path());
 
                 match Stat::new(&entry.path(), Some(&entry), options) {
                     Ok(this_stat) => {
@@ -409,7 +422,7 @@ fn du(
                                 }
                             }
 
-                            du(this_stat, options, depth + 1, seen_inodes, print_tx, current_dir, dir_stack, Some(&mut my_stat))?;
+                            du(this_stat, options, depth + 1, seen_inodes, print_tx, current_dir, Some(&mut my_stat))?;
                         } else {
                             my_stat.size += this_stat.size;
                             my_stat.blocks += this_stat.blocks;
@@ -440,20 +453,27 @@ fn du(
         }
     }
 
+    if changed_dir {
+        current_dir.pop();
+        for path_chunk in current_dir.iter() {
+            env::set_current_dir(path_chunk)?;
+        }
+    }
+
+    let mut full_path = PathBuf::new();
+    let mut path_chunks = current_dir.iter();
+    // skip first component, (i.e. don't include base directory in the name)
+    path_chunks.next();
+    for c in path_chunks {
+        full_path.push(c);
+    }
+    full_path.push(&my_stat.path);
+
     print_tx.send(Ok(StatPrintInfo {
         stat: my_stat,
         depth: depth,
-        full_path: current_dir.clone(),
+        full_path: full_path,
     }))?;
-
-    for _ in 0..n_components {
-        current_dir.pop();
-    }
-
-    dir_stack.pop();
-    for dir in &mut *dir_stack {
-        env::set_current_dir(dir)?;
-    };
 
     Ok(())
 }
@@ -818,16 +838,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                     seen_inodes.insert(inode);
                 }
 
-                let mut current_dir = PathBuf::new();
-                match path.components().next() {
-                    Some(c) if c == std::path::Component::CurDir => current_dir.push(c),
-                    None => current_dir.push(std::path::Component::CurDir),
-                    _ => (),
-                };
+                let mut current_dir = vec![env::current_dir().unwrap()];
 
-                let mut dir_stack = Vec::new();
-                dir_stack.push(env::current_dir().unwrap());
-                du(stat, &traversal_options, 0, &mut seen_inodes, &print_tx, &mut current_dir, &mut dir_stack, None)
+                du(stat, &traversal_options, 0, &mut seen_inodes, &print_tx, &mut current_dir, None)
                     .map_err(|e| USimpleError::new(1, e.to_string()))?;
             } else {
                 print_tx
