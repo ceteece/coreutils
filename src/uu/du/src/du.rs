@@ -1,22 +1,18 @@
-#![feature(io_error_more)]
 // This file is part of the uutils coreutils package.
 //
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
+use cap_std::fs::MetadataExt;
 use chrono::{DateTime, Local};
 use clap::{builder::PossibleValue, crate_version, Arg, ArgAction, ArgMatches, Command};
 use glob::Pattern;
 use std::collections::HashSet;
 use std::env;
 #[cfg(not(windows))]
-use std::fs::Metadata;
-use std::fs::{self, DirEntry, File};
+use cap_std::fs::Metadata;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
-#[cfg(not(windows))]
-use std::os::unix::fs::MetadataExt;
-#[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
@@ -140,7 +136,8 @@ struct Stat {
 impl Stat {
     fn new(
         path: &Path,
-        dir_entry: Option<&DirEntry>,
+        current_dir: Option<&cap_std::fs::Dir>,
+        dir_entry: Option<&cap_std::fs::DirEntry>,
         options: &TraversalOptions,
     ) -> std::io::Result<Self> {
         // Determine whether to dereference (follow) the symbolic link
@@ -150,16 +147,32 @@ impl Stat {
             Deref::None => false,
         };
 
-        let metadata = if should_dereference {
-            // Get metadata, following symbolic links if necessary
-            fs::metadata(path)
-        } else if let Some(dir_entry) = dir_entry {
-            // Get metadata directly from the DirEntry, which is faster on Windows
-            dir_entry.metadata()
-        } else {
-            // Get metadata from the filesystem without following symbolic links
-            fs::symlink_metadata(path)
-        }?;
+        let metadata = match current_dir {
+            Some(current_dir) => {
+                 if should_dereference {
+                     // Get metadata, following symbolic links if necessary
+                     current_dir.metadata(dir_entry.unwrap().file_name())?
+                 } else if let Some(dir_entry) = dir_entry {
+                     // Get metadata directly from the DirEntry, which is faster on Windows
+                     dir_entry.metadata()?
+                 } else {
+                     // Get metadata from the filesystem without following symbolic links
+                     current_dir.symlink_metadata(dir_entry.unwrap().file_name())?
+                 }
+            },
+            None => {
+                if should_dereference {
+                    // Get metadata, following symbolic links if necessary
+                    cap_std::fs::Metadata::from_just_metadata(fs::metadata(path)?)
+                } else if let Some(dir_entry) = dir_entry {
+                    // Get metadata directly from the DirEntry, which is faster on Windows
+                    dir_entry.metadata()?
+                } else {
+                    // Get metadata from the filesystem without following symbolic links
+                    cap_std::fs::Metadata::from_just_metadata(fs::symlink_metadata(path)?)
+                }
+            },
+        };
 
         #[cfg(not(windows))]
         {
@@ -218,7 +231,7 @@ fn windows_creation_time_to_unix_time(win_time: u64) -> Option<u64> {
 fn birth_u64(meta: &Metadata) -> Option<u64> {
     meta.created()
         .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .and_then(|t| t.duration_since(cap_std::time::SystemTime::from_std(UNIX_EPOCH)).ok())
         .map(|e| e.as_secs())
 }
 
@@ -311,49 +324,12 @@ fn du(
     depth: usize,
     seen_inodes: &mut HashSet<FileInfo>,
     print_tx: &mpsc::Sender<UResult<StatPrintInfo>>,
-    current_dir: &mut Vec<PathBuf>,
+    current_path: &mut PathBuf,
+    current_dir: cap_std::fs::Dir,
     parent_stat: Option<&mut Stat>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut changed_dir = false;
-
-    let read = match fs::read_dir(&my_stat.path) {
+    let read = match current_dir.read_dir(".") {
         Ok(read) => read,
-        Err(e) if e.kind() == std::io::ErrorKind::InvalidFilename => {
-            let parent_path = match my_stat.path.parent() {
-                Some(path) => path.to_owned(),
-                None => PathBuf::from("."),
-            };
-
-            if let Err(e) = env::set_current_dir(&parent_path) {
-                // TODO: make this error message use full parent path (i.e. accounting for current directory being different from origin directory)
-                print_tx.send(Err(e.map_err_context(|| {
-                    format!("cannot enter directory {}", parent_path.quote())
-                })))?;
-
-                return Ok(());
-            }
-
-            let read = match fs::read_dir(my_stat.path.file_name().unwrap()) {
-                Ok(read) => read,
-                Err(e) => {
-                    print_tx.send(Err(e.map_err_context(|| {
-                        format!("cannot read directory {}", my_stat.path.quote())
-                    })))?;
-
-                    // since we still failed to read the directory after changing directory to parent directory,
-                    //   go back up to previous directory
-                    for path_chunk in current_dir {
-                        env::set_current_dir(path_chunk)?;
-                    }
-
-                    return Ok(());
-                },
-            };
-
-            changed_dir = true;
-            current_dir.push(parent_path);
-            read
-        },
         Err(e) => {
             // TODO: need to actually include full path in the error
             print_tx.send(Err(e.map_err_context(|| {
@@ -367,16 +343,12 @@ fn du(
     'file_loop: for f in read {
         match f {
             Ok(entry) => {
-                let mut full_path = PathBuf::new();
-                let mut path_chunks = current_dir.iter();
-                // skip first component, (i.e. don't include base directory in the name)
-                path_chunks.next();
-                for c in path_chunks {
-                    full_path.push(c);
-                }
-                full_path.push(&entry.path());
+                let mut full_path = current_path.clone();
+                full_path.push(&entry.file_name());
 
-                match Stat::new(&entry.path(), Some(&entry), options) {
+                // TODO: make sure we don't use full path ever when retrieving file metadata?
+                //   might need to update Stat::new
+                match Stat::new(&full_path, Some(&current_dir), Some(&entry), options) {
                     Ok(this_stat) => {
                         // We have an exclude list
                         for pattern in &options.excludes {
@@ -422,7 +394,10 @@ fn du(
                                 }
                             }
 
-                            du(this_stat, options, depth + 1, seen_inodes, print_tx, current_dir, Some(&mut my_stat))?;
+                            let child_dir = cap_std::fs::Dir::from_std_file(current_dir.open(&entry.file_name()).unwrap().into_std());
+                            current_path.push(&entry.file_name());
+                            du(this_stat, options, depth + 1, seen_inodes, print_tx, current_path, child_dir, Some(&mut my_stat))?;
+                            current_path.pop();
                         } else {
                             my_stat.size += this_stat.size;
                             my_stat.blocks += this_stat.blocks;
@@ -431,7 +406,6 @@ fn du(
                                 print_tx.send(Ok(StatPrintInfo {
                                     stat: this_stat,
                                     depth: depth + 1,
-                                    full_path: full_path,
                                 }))?;
                             }
                         }
@@ -453,26 +427,9 @@ fn du(
         }
     }
 
-    if changed_dir {
-        current_dir.pop();
-        for path_chunk in current_dir.iter() {
-            env::set_current_dir(path_chunk)?;
-        }
-    }
-
-    let mut full_path = PathBuf::new();
-    let mut path_chunks = current_dir.iter();
-    // skip first component, (i.e. don't include base directory in the name)
-    path_chunks.next();
-    for c in path_chunks {
-        full_path.push(c);
-    }
-    full_path.push(&my_stat.path);
-
     print_tx.send(Ok(StatPrintInfo {
         stat: my_stat,
         depth: depth,
-        full_path: full_path,
     }))?;
 
     Ok(())
@@ -549,7 +506,6 @@ fn build_exclude_patterns(matches: &ArgMatches) -> UResult<Vec<Pattern>> {
 struct StatPrintInfo {
     stat: Stat,
     depth: usize,
-    full_path: PathBuf,
 }
 
 impl StatPrinter {
@@ -587,7 +543,7 @@ impl StatPrinter {
                                 .map_or(true, |max_depth| stat_info.depth <= max_depth)
                             && (!self.summarize || stat_info.depth == 0)
                         {
-                            self.print_stat(&stat_info.stat, size, &stat_info.full_path)?;
+                            self.print_stat(&stat_info.stat, size)?;
                         }
                     }
                     Err(e) => show!(e),
@@ -625,7 +581,7 @@ impl StatPrinter {
         }
     }
 
-    fn print_stat(&self, stat: &Stat, size: u64, full_path: &PathBuf) -> UResult<()> {
+    fn print_stat(&self, stat: &Stat, size: u64) -> UResult<()> {
         if let Some(time) = self.time {
             let secs = get_time_secs(time, stat)?;
             let tm = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(secs));
@@ -635,7 +591,7 @@ impl StatPrinter {
             print!("{}\t", self.convert_size(size));
         }
 
-        print_verbatim(full_path).unwrap();
+        print_verbatim(&stat.path).unwrap();
         print!("{}", self.line_ending);
 
         Ok(())
@@ -830,7 +786,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         }
 
         // Check existence of path provided in argument
-        if let Ok(stat) = Stat::new(&path, None, &traversal_options) {
+        if let Ok(stat) = Stat::new(&path, None, None, &traversal_options) {
             if stat.is_dir {
                 // Kick off the computation of disk usage from the initial path
                 let mut seen_inodes: HashSet<FileInfo> = HashSet::new();
@@ -838,13 +794,14 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                     seen_inodes.insert(inode);
                 }
 
-                let mut current_dir = vec![env::current_dir().unwrap()];
+                let mut current_path = PathBuf::from(&path);
+                let current_dir = cap_std::fs::Dir::from_std_file(File::open(&path).unwrap());
 
-                du(stat, &traversal_options, 0, &mut seen_inodes, &print_tx, &mut current_dir, None)
+                du(stat, &traversal_options, 0, &mut seen_inodes, &print_tx, &mut current_path, current_dir, None)
                     .map_err(|e| USimpleError::new(1, e.to_string()))?;
             } else {
                 print_tx
-                    .send(Ok(StatPrintInfo { stat, depth: 0, full_path: path }))
+                    .send(Ok(StatPrintInfo { stat, depth: 0 }))
                     .map_err(|e| USimpleError::new(1, e.to_string()))?;
             }
         } else {

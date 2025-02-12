@@ -273,6 +273,7 @@ binary-heap-plus = "0.5.0"
 bstr = "1.9.1"
 bytecount = "0.6.8"
 byteorder = "1.5.0"
+cap-std = "3.4.2"
 chrono = { version = "0.4.38", default-features = false, features = [
   "std",
   "alloc",
