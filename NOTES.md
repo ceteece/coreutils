@@ -95,8 +95,42 @@
 - I might just want to drop a note in the issue or in the discord that it seems like we can't really do this until that particular error is stabilized
   - and then in the meantime I can maybe keep working on this using nightly rust or something?
 
+- okay, based on comments in the `du/long-from-unreachable.sh` test, seems like GNU uses `openat` to be able to handle long paths without actually needing to change directories
+  - looks like there is a Rust library for this but it doesn't seem particularly robust
+    - actually, it's entirely unmaintained
+    - looks like there is another crate called `Rustix` which has this and seems more actively maintained which has an `openat` implemenation which seems like it could work
+      - still, I think that only works for Linux
+      - but it looks like Windows has an `NtCreateFile` API function that can do something similar?
+    - seems like the `cap-std` crate might have a cross-platform implemenation we can use?
+      - https://github.com/bytecodealliance/cap-std/blob/dcead54dba1ae9f519d2a7c0e91713549d44f3fa/cap-std/src/fs/dir.rs#L290
 
+- okay, seems like there are primarily two directions I can go down here:
+  - actually change current directory in order to shorten relative paths
+    - for performance reasons, we probably only want to change directories when we hit a filename that is too long and causes an error
+      - requires `std::io::ErrorKind::InvalidFilename`, which is not yet stabilized, in order to detect this specific failure
+    - in order to pass GNU test, once we get an input with an absolute path, we will want to avoid trying to return to original directory unless we have later inputs which are relative paths
+      - otherwise we are fine to just keep using absolute paths and never returning to original directory
+  - don't actually change current directory, just use something like `openat` to be able to open directories using their path relative to some other already-open directory
+    - this seems preferable in theory, seems to have less opportunity for unintended consequences
+    - it seems like the most robust cross-platform implementation of this type of functionality is in `cap-std`
+    - probably can just use this at every level of recursion, thus no need to specifically catch `std::io::ErrorKind::InvalidFilename`
+    - I need to test this functionality out to see if it actually works the way I expect
+    - also need to make sure it actually works on all platforms we need
+    - also need to be careful that we can actually use the `cap-std` stuff without breaking `struct Stat`
 
+- either way, we will probably want to refactor `du` into an struct with some methods (most of which should be inlined) to make adding these changes cleaner and more straightforward, and just generally make maintenance easier
+
+- next steps:
+  - do some toy tests with `cap-std` to see if it works the way I think it does
+    - looks good
+  - confirm that `cap-std` actually supports all of the platforms we need
+    - seems like it covers Linux/windows/mac, so probably fine?
+  - make post in issue describing options I'm currently looking at
+  - if `cap-std` is actually a viable option based on my tests, create a fork of my current branch where I try to actually use it
+  - add unit tests to cover long paths:
+    - as relative path (+ with some second path argument
+    - as absolute path (+ with some second path argument)
+  - if `cap-std` stuff didn't work out, try passing tests using the directory-changing approach
 
 
 TODO:
