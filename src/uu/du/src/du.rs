@@ -3,16 +3,19 @@
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-use cap_std::fs::MetadataExt;
 use chrono::{DateTime, Local};
 use clap::{builder::PossibleValue, crate_version, Arg, ArgAction, ArgMatches, Command};
 use glob::Pattern;
 use std::collections::HashSet;
 use std::env;
 #[cfg(not(windows))]
-use cap_std::fs::Metadata;
-use std::fs::{self, File};
+use std::fs::Metadata;
+use std::fs::{self, DirEntry, File};
 use std::io::{BufRead, BufReader};
+#[cfg(not(windows))]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
@@ -131,13 +134,15 @@ struct Stat {
     created: Option<u64>,
     accessed: u64,
     modified: u64,
+    dir: Option<rustix::fs::Dir>,
+    fd: rustix::fs::OwnedFd,
 }
 
 impl Stat {
+    #[cfg(not(windows))]
     fn new(
         path: &Path,
-        current_dir: Option<&cap_std::fs::Dir>,
-        dir_entry: Option<&cap_std::fs::DirEntry>,
+        parent_fd: rustix::fd::OwnedFd,
         options: &TraversalOptions,
     ) -> std::io::Result<Self> {
         // Determine whether to dereference (follow) the symbolic link
@@ -147,70 +152,105 @@ impl Stat {
             Deref::None => false,
         };
 
-        let metadata = match current_dir {
-            Some(current_dir) => {
-                 if should_dereference {
-                     // Get metadata, following symbolic links if necessary
-                     current_dir.metadata(dir_entry.unwrap().file_name())?
-                 } else if let Some(dir_entry) = dir_entry {
-                     // Get metadata directly from the DirEntry, which is faster on Windows
-                     dir_entry.metadata()?
-                 } else {
-                     // Get metadata from the filesystem without following symbolic links
-                     current_dir.symlink_metadata(dir_entry.unwrap().file_name())?
-                 }
-            },
-            None => {
-                if should_dereference {
-                    // Get metadata, following symbolic links if necessary
-                    cap_std::fs::Metadata::from_just_metadata(fs::metadata(path)?)
-                } else if let Some(dir_entry) = dir_entry {
-                    // Get metadata directly from the DirEntry, which is faster on Windows
-                    dir_entry.metadata()?
-                } else {
-                    // Get metadata from the filesystem without following symbolic links
-                    cap_std::fs::Metadata::from_just_metadata(fs::symlink_metadata(path)?)
-                }
-            },
+        let oflags = {
+            if should_dereference {
+                rustix::fs::OFlags { }
+            } else {
+                rustix::fs::OFlags::NOFOLLOW
+            }
+        };
+            
+        let fd = rustix::fs::openat(parent_fd, path.file_name(), oflags, rustix::fs::Mode::all()).unwrap();
+        let file = std::fs::File.from(fd);
+        let metadata = file.metadata().unwrap();
+        let dir = {
+            if metadata.is_dir() {
+                Some(rustix::fs::Dir::read_from(fd).unwrap())
+            } else {
+                None
+            }
         };
 
-        #[cfg(not(windows))]
-        {
-            let file_info = FileInfo {
-                file_id: metadata.ino() as u128,
-                dev_id: metadata.dev(),
-            };
+        let file_info = FileInfo {
+            file_id: metadata.ino() as u128,
+            dev_id: metadata.dev(),
+        };
 
-            Ok(Self {
-                path: path.to_path_buf(),
-                is_dir: metadata.is_dir(),
-                size: if metadata.is_dir() { 0 } else { metadata.len() },
-                blocks: metadata.blocks(),
-                inodes: 1,
-                inode: Some(file_info),
-                created: birth_u64(&metadata),
-                accessed: metadata.atime() as u64,
-                modified: metadata.mtime() as u64,
-            })
+        Ok(Self {
+            path: path.to_path_buf(),
+            is_dir: metadata.is_dir(),
+            size: if metadata.is_dir() { 0 } else { metadata.len() },
+            blocks: metadata.blocks(),
+            inodes: 1,
+            inode: Some(file_info),
+            created: birth_u64(&metadata),
+            accessed: metadata.atime() as u64,
+            modified: metadata.mtime() as u64,
+            dir: dir,
+            fd: fd,
+        })
+    }
+
+    #[cfg(not(windows))]
+    fn read_dir(&self) -> impl Iterator<Item = std::io::Result<Stat>> {
+        let dir = self.dir.unwrap();
+
+        let read = vec![];
+        while let Some(f) = current_dir.read() {
+            match f {
+                Ok(entry) => {
+                    let mut full_path = self.path.clone();
+                    full_path.push(&entry.file_name());
+                    read.push(Stat::new(full_path, fd, self.options));
+                },
+                Err(e) => panic!("TODO: actually handle this error"),
+            }
         }
 
-        #[cfg(windows)]
-        {
-            let size_on_disk = get_size_on_disk(path);
-            let file_info = get_file_info(path);
+        read
+    }
 
-            Ok(Self {
-                path: path.to_path_buf(),
-                is_dir: metadata.is_dir(),
-                size: if metadata.is_dir() { 0 } else { metadata.len() },
-                blocks: size_on_disk / 1024 * 2,
-                inodes: 1,
-                inode: file_info,
-                created: windows_creation_time_to_unix_time(metadata.creation_time()),
-                accessed: windows_time_to_unix_time(metadata.last_access_time()),
-                modified: windows_time_to_unix_time(metadata.last_write_time()),
-            })
-        }
+    #[cfg(windows)]
+    fn new(
+        path: &Path,
+        current_dir: Option<&fs::Dir>,
+        dir_entry: Option<&fs::DirEntry>,
+        options: &TraversalOptions,
+    ) -> std::io::Result<Self> {
+        // Determine whether to dereference (follow) the symbolic link
+        let should_dereference = match &options.dereference {
+            Deref::All => true,
+            Deref::Args(paths) => paths.contains(&path.to_path_buf()),
+            Deref::None => false,
+        };
+
+        let metadata = {
+            if should_dereference {
+                // Get metadata, following symbolic links if necessary
+                current_dir.metadata(dir_entry.unwrap().file_name())?
+            } else if let Some(dir_entry) = dir_entry {
+                // Get metadata directly from the DirEntry, which is faster on Windows
+                dir_entry.metadata()?
+            } else {
+                // Get metadata from the filesystem without following symbolic links
+                current_dir.symlink_metadata(dir_entry.unwrap().file_name())?
+            }
+        };
+
+        let size_on_disk = get_size_on_disk(path);
+        let file_info = get_file_info(path);
+
+        Ok(Self {
+            path: path.to_path_buf(),
+            is_dir: metadata.is_dir(),
+            size: if metadata.is_dir() { 0 } else { metadata.len() },
+            blocks: size_on_disk / 1024 * 2,
+            inodes: 1,
+            inode: file_info,
+            created: windows_creation_time_to_unix_time(metadata.creation_time()),
+            accessed: windows_time_to_unix_time(metadata.last_access_time()),
+            modified: windows_time_to_unix_time(metadata.last_write_time()),
+        })
     }
 }
 
@@ -231,7 +271,7 @@ fn windows_creation_time_to_unix_time(win_time: u64) -> Option<u64> {
 fn birth_u64(meta: &Metadata) -> Option<u64> {
     meta.created()
         .ok()
-        .and_then(|t| t.duration_since(cap_std::time::SystemTime::from_std(UNIX_EPOCH)).ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|e| e.as_secs())
 }
 
@@ -324,10 +364,9 @@ fn du(
     depth: usize,
     seen_inodes: &mut HashSet<FileInfo>,
     print_tx: &mpsc::Sender<UResult<StatPrintInfo>>,
-    current_path: &mut PathBuf,
-    current_dir: cap_std::fs::Dir,
     parent_stat: Option<&mut Stat>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    /*
     let read = match current_dir.read_dir(".") {
         Ok(read) => read,
         Err(e) => {
@@ -339,83 +378,75 @@ fn du(
             return Ok(());
         }
     };
+    */
+
+    let read = my_stat.read_dir();
 
     'file_loop: for f in read {
         match f {
-            Ok(entry) => {
-                let mut full_path = current_path.clone();
-                full_path.push(&entry.file_name());
-
-                // TODO: make sure we don't use full path ever when retrieving file metadata?
-                //   might need to update Stat::new
-                match Stat::new(&full_path, Some(&current_dir), Some(&entry), options) {
-                    Ok(this_stat) => {
-                        // We have an exclude list
-                        for pattern in &options.excludes {
-                            // Look at all patterns with both short and long paths
-                            // if we have 'du foo' but search to exclude 'foo/bar'
-                            // we need the full path
-                            if pattern.matches(&full_path.to_string_lossy())
-                                || pattern.matches(&entry.file_name().into_string().unwrap())
-                            {
-                                // if the directory is ignored, leave early
-                                if options.verbose {
-                                    println!("{} ignored", &full_path.quote());
-                                }
-                                // Go to the next file
-                                continue 'file_loop;
-                            }
+            // TODO: make sure we don't use full path ever when retrieving file metadata?
+            //   might need to update Stat::new
+            Ok(this_stat) => {
+                // We have an exclude list
+                for pattern in &options.excludes {
+                    // Look at all patterns with both short and long paths
+                    // if we have 'du foo' but search to exclude 'foo/bar'
+                    // we need the full path
+                    if pattern.matches(&this_stat.path.to_string_lossy())
+                        || pattern.matches(&this_stat.path.file_name().into_string().unwrap())
+                    {
+                        // if the directory is ignored, leave early
+                        if options.verbose {
+                            println!("{} ignored", &this_stat.path.quote());
                         }
+                        // Go to the next file
+                        continue 'file_loop;
+                    }
+                }
 
-                        if let Some(inode) = this_stat.inode {
-                            // Check if the inode has been seen before and if we should skip it
-                            if seen_inodes.contains(&inode)
-                                && (!options.count_links || !options.all)
-                            {
-                                // If `count_links` is enabled and `all` is not, increment the inode count
-                                if options.count_links && !options.all {
-                                    my_stat.inodes += 1;
-                                }
-                                // Skip further processing for this inode
-                                continue;
-                            }
-                            // Mark this inode as seen
-                            seen_inodes.insert(inode);
-                        }
-
-                        if this_stat.is_dir {
-                            if options.one_file_system {
-                                if let (Some(this_inode), Some(my_inode)) =
-                                    (this_stat.inode, my_stat.inode)
-                                {
-                                    if this_inode.dev_id != my_inode.dev_id {
-                                        continue;
-                                    }
-                                }
-                            }
-
-                            let child_dir = cap_std::fs::Dir::from_std_file(current_dir.open(&entry.file_name()).unwrap().into_std());
-                            current_path.push(&entry.file_name());
-                            du(this_stat, options, depth + 1, seen_inodes, print_tx, current_path, child_dir, Some(&mut my_stat))?;
-                            current_path.pop();
-                        } else {
-                            my_stat.size += this_stat.size;
-                            my_stat.blocks += this_stat.blocks;
+                if let Some(inode) = this_stat.inode {
+                    // Check if the inode has been seen before and if we should skip it
+                    if seen_inodes.contains(&inode)
+                        && (!options.count_links || !options.all)
+                    {
+                        // If `count_links` is enabled and `all` is not, increment the inode count
+                        if options.count_links && !options.all {
                             my_stat.inodes += 1;
-                            if options.all {
-                                print_tx.send(Ok(StatPrintInfo {
-                                    stat: this_stat,
-                                    depth: depth + 1,
-                                }))?;
+                        }
+                        // Skip further processing for this inode
+                        continue;
+                    }
+                    // Mark this inode as seen
+                    seen_inodes.insert(inode);
+                }
+
+                if this_stat.is_dir {
+                    if options.one_file_system {
+                        if let (Some(this_inode), Some(my_inode)) =
+                            (this_stat.inode, my_stat.inode)
+                        {
+                            if this_inode.dev_id != my_inode.dev_id {
+                                continue;
                             }
                         }
                     }
-                    Err(e) => print_tx.send(Err(e.map_err_context(|| {
-                        format!("cannot access {}", full_path.quote())
-                    })))?,
+
+                    du(this_stat, options, depth + 1, seen_inodes, print_tx, Some(&mut my_stat))?;
+                } else {
+                    my_stat.size += this_stat.size;
+                    my_stat.blocks += this_stat.blocks;
+                    my_stat.inodes += 1;
+                    if options.all {
+                        print_tx.send(Ok(StatPrintInfo {
+                            stat: this_stat,
+                            depth: depth + 1,
+                        }))?;
+                    }
                 }
-            }
-            Err(error) => print_tx.send(Err(error.into()))?,
+            },
+            Err(e) => print_tx.send(Err(e.map_err_context(|| {
+                format!("cannot access {}", full_path.quote())
+            })))?,
         }
     }
 

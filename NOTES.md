@@ -132,6 +132,22 @@
     - as absolute path (+ with some second path argument)
   - if `cap-std` stuff didn't work out, try passing tests using the directory-changing approach
 
+- okay, the cap-std stuff seems to mostly work, with a few concerns that may or may not be show-stoppers:
+  - seems like `Dir::metadata` throws an error if symlink leads out of the filesystem
+    - specifically a custom `ErrorKind::PermissionDenied`
+      - I should see where this factors in to see if I can circumvent it somehow...
+    - which makes sense, since one of the purposes of this `cap_std` stuff is to provide sandboxes for WASM stuff
+    - is there a way around this?
+      - maybe by using one of the lower-level APIs, which might be able to gives us the cross-platform `openat`-style functionality without adding the sandboxing stuff on top of it
+      - okay, looks like theres `read_link_unchecked` function, which isn't public, but:
+        - for Unix-like, it just calls `rustix::fs::readlinkat`, which I think is a public thing we can maybe try using?
+          - need to see how `Dir::metadata` actually works to see how we should use the result of following the link
+        - for Windows, it just calls `fs::read_link` with the full path
+          - are file path length limits not a thing anymore on Windows? I think I read something indiciating that might be the case at some point, but I'm not sure if it's actually true
+            - I suppose it's something I could test
+  - the `get_file_on_disk` and `get_file_info` functions for windows currently take full paths
+    - how hard would it be to update these to work with this new paradigm, perhaps using a file + relative path?
+  - I should also at some point assess what the overall performance impact is of this...
 
 TODO:
 - clean up unwraps and panics

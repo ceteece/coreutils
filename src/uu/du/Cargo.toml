@@ -20,9 +20,9 @@ path = "src/du.rs"
 chrono = { workspace = true }
 # For the --exclude & --exclude-from options
 glob = { workspace = true }
-cap-std = "3.4.2"
 clap = { workspace = true }
 uucore = { workspace = true, features = ["format"] }
+rustix = "0.38.44"
 thiserror = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
