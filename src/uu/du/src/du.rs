@@ -835,7 +835,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         full_path.push(&path);
 
         // Check existence of path provided in argument
-        if let Ok(stat) = Stat::new(&full_path, &path, &current_fd, &traversal_options) {
+        if let Ok(stat) = Stat::new(&path, &path, &current_fd, &traversal_options) {
             if stat.is_dir {
                 // Kick off the computation of disk usage from the initial path
                 let mut seen_inodes: HashSet<FileInfo> = HashSet::new();
