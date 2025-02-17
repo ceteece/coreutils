@@ -14,6 +14,8 @@ use std::fs::{self, DirEntry, File};
 use std::io::{BufRead, BufReader};
 #[cfg(not(windows))]
 use std::os::unix::fs::MetadataExt;
+#[cfg(not(windows))]
+use std::os::unix::ffi::OsStrExt;
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 #[cfg(windows)]
@@ -135,14 +137,15 @@ struct Stat {
     accessed: u64,
     modified: u64,
     dir: Option<rustix::fs::Dir>,
-    fd: rustix::fs::OwnedFd,
+    fd: rustix::fd::OwnedFd,
 }
 
 impl Stat {
     #[cfg(not(windows))]
     fn new(
         path: &Path,
-        parent_fd: rustix::fd::OwnedFd,
+        path_rel: &Path,
+        parent_fd: &rustix::fd::OwnedFd,
         options: &TraversalOptions,
     ) -> std::io::Result<Self> {
         // Determine whether to dereference (follow) the symbolic link
@@ -154,18 +157,19 @@ impl Stat {
 
         let oflags = {
             if should_dereference {
-                rustix::fs::OFlags { }
+                rustix::fs::OFlags::empty()
             } else {
                 rustix::fs::OFlags::NOFOLLOW
             }
         };
             
-        let fd = rustix::fs::openat(parent_fd, path.file_name(), oflags, rustix::fs::Mode::all()).unwrap();
-        let file = std::fs::File.from(fd);
+        let fd = rustix::fs::openat(parent_fd, path_rel, oflags, rustix::fs::Mode::all()).unwrap();
+        let file = std::fs::File::from(fd);
         let metadata = file.metadata().unwrap();
+        let fd = rustix::fd::OwnedFd::from(file);
         let dir = {
             if metadata.is_dir() {
-                Some(rustix::fs::Dir::read_from(fd).unwrap())
+                Some(rustix::fs::Dir::read_from(&fd).unwrap())
             } else {
                 None
             }
@@ -192,18 +196,25 @@ impl Stat {
     }
 
     #[cfg(not(windows))]
-    fn read_dir(&self) -> impl Iterator<Item = std::io::Result<Stat>> {
-        let dir = self.dir.unwrap();
+    fn read_dir(&mut self, options: &TraversalOptions) -> Vec<std::io::Result<Stat>> {
+        
+        //let mut dir = self.dir.unwrap();
 
-        let read = vec![];
-        while let Some(f) = current_dir.read() {
+        let mut read = vec![];
+        while let Some(f) = self.dir.as_mut().unwrap().read() {
             match f {
                 Ok(entry) => {
+                    let filename = std::ffi::OsStr::from_bytes(entry.file_name().to_bytes());
+
+                    if filename == ".." || filename == "." {
+                        continue;
+                    }
+
                     let mut full_path = self.path.clone();
-                    full_path.push(&entry.file_name());
-                    read.push(Stat::new(full_path, fd, self.options));
+                    full_path.push(filename);
+                    read.push(Stat::new(&full_path, filename.as_ref(), &self.fd, options));
                 },
-                Err(e) => panic!("TODO: actually handle this error"),
+                Err(_e) => panic!("TODO: actually handle this error"),
             }
         }
 
@@ -380,7 +391,7 @@ fn du(
     };
     */
 
-    let read = my_stat.read_dir();
+    let read = my_stat.read_dir(options);
 
     'file_loop: for f in read {
         match f {
@@ -393,7 +404,7 @@ fn du(
                     // if we have 'du foo' but search to exclude 'foo/bar'
                     // we need the full path
                     if pattern.matches(&this_stat.path.to_string_lossy())
-                        || pattern.matches(&this_stat.path.file_name().into_string().unwrap())
+                        || pattern.matches(&this_stat.path.file_name().unwrap().to_str().unwrap())
                     {
                         // if the directory is ignored, leave early
                         if options.verbose {
@@ -444,8 +455,9 @@ fn du(
                     }
                 }
             },
+            // TODO: need error message to be properly set by `Stat::new`
             Err(e) => print_tx.send(Err(e.map_err_context(|| {
-                format!("cannot access {}", full_path.quote())
+                format!("cannot access TODO")
             })))?,
         }
     }
@@ -801,6 +813,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let (print_tx, rx) = mpsc::channel::<UResult<StatPrintInfo>>();
     let printing_thread = thread::spawn(move || stat_printer.print_stats(&rx));
 
+    let current_dir = std::env::current_dir().unwrap();
+    let current_fd = rustix::fs::open(&current_dir, rustix::fs::OFlags::empty(), rustix::fs::Mode::all()).unwrap();
+
     'loop_file: for path in files {
         // Skip if we don't want to ignore anything
         if !&traversal_options.excludes.is_empty() {
@@ -816,8 +831,11 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             }
         }
 
+        let mut full_path = current_dir.clone();
+        full_path.push(&path);
+
         // Check existence of path provided in argument
-        if let Ok(stat) = Stat::new(&path, None, None, &traversal_options) {
+        if let Ok(stat) = Stat::new(&full_path, &path, &current_fd, &traversal_options) {
             if stat.is_dir {
                 // Kick off the computation of disk usage from the initial path
                 let mut seen_inodes: HashSet<FileInfo> = HashSet::new();
@@ -825,10 +843,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                     seen_inodes.insert(inode);
                 }
 
-                let mut current_path = PathBuf::from(&path);
-                let current_dir = cap_std::fs::Dir::from_std_file(File::open(&path).unwrap());
-
-                du(stat, &traversal_options, 0, &mut seen_inodes, &print_tx, &mut current_path, current_dir, None)
+                du(stat, &traversal_options, 0, &mut seen_inodes, &print_tx, None)
                     .map_err(|e| USimpleError::new(1, e.to_string()))?;
             } else {
                 print_tx

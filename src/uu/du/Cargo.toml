@@ -22,7 +22,7 @@ chrono = { workspace = true }
 glob = { workspace = true }
 clap = { workspace = true }
 uucore = { workspace = true, features = ["format"] }
-rustix = "0.38.44"
+rustix = { version = "0.38.44", features = ["fs"] }
 thiserror = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
