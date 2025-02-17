@@ -1,3 +1,25 @@
+- okay, it seems like this openat method might actually work
+  - I've got most of the unit tests passing except for a few
+  - seems like there are a few major types of issues in the unit tests:
+    - some sort of issue with some tests involving symlinks
+      - get an error about filesystem loop, too many links, something like that
+    - errors simply arising from the fact that were not handling printing error messages properly and just panicking
+      - this should be easy enough to fix
+    - error about having too many files open
+      - this should be fixed when we switch to `read_dir` being an actual iterator, so we only have one file open per level at a time
+
+- next steps:
+  - check if actually passes GNU test
+  - fix broken tests:
+    - switch `read_dir` to provide actual iterator, see if this fixes the failure for having too many files open
+    - figure out why the symlink tests are failing
+    - clean up all unwraps and whatnot, add actual error-handling
+  - make whatever slight modifications are needed to the windows code path to make sure that's not broken
+  - refactor to get actually decent performance
+    - don't open files unless they are directories, otherwise just stat them (using `statat`) to get their metadata without opening
+
+
+===============================
 - okay, I think I've got a decent general plan for handling the rest of this:
   - switch `du` function to only take directories
   - in current layer of resursion, change directory to child just before calling `du` on child
