@@ -236,6 +236,10 @@ impl Stat {
             }
         }
 
+        // TODO: close the directory after this, so we only have one file descriptor open at a time
+        //   if we don't do this, we'll have a file open for each directory along the current path
+        //   TODO: maybe add test to esnure that we don't use too many file descriptors when we have really deep directory structure?
+
         read
     }
 

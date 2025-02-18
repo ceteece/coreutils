@@ -1,3 +1,19 @@
+- next steps:
+  - fix remaining two symlink tests
+  - make update to pass GNU test
+  - update `Stat::read_dir` to close directory file descriptor after it's been read
+  - do some light re-factoring so that the overall design is clean, robust, and extensible
+  - clean up all unwraps and whatnot, add actual error-handling
+  - make whatever slight modifications are needed to the windows code path to make sure that's not broken
+    - also try to make sure we're not going to break any other Unix-like platforms
+  - clean up handling off stat results
+    - and actually handle birthtime properly
+    - maybe make `UnixlikeMetadata` struct to abstract away all of the stat handling for different Unix-like platforms
+  - make post on issue to give update of current approaches, progress, potential concerns
+    - exploring two options: changing directories, or using `openat` / `statat`
+      - explain tradeoffs and concerns with each approach
+
+==========
 - okay, it seems like this openat method might actually work
   - I've got most of the unit tests passing except for a few
   - seems like there are a few major types of issues in the unit tests:
