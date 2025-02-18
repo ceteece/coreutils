@@ -137,7 +137,7 @@ struct Stat {
     accessed: u64,
     modified: u64,
     dir: Option<rustix::fs::Dir>,
-    fd: rustix::fd::OwnedFd,
+    fd: Option<rustix::fd::OwnedFd>,
 }
 
 impl Stat {
@@ -155,41 +155,62 @@ impl Stat {
             Deref::None => false,
         };
 
-        let oflags = {
+        let oflags = rustix::fs::OFlags::empty();
+        //let oflags = {
+        //    if should_dereference {
+        //        rustix::fs::OFlags::empty()
+        //    } else {
+        //        rustix::fs::OFlags::NOFOLLOW
+        //    }
+        //};
+
+        let atflags = {
             if should_dereference {
-                rustix::fs::OFlags::empty()
+                rustix::fs::AtFlags::empty()
             } else {
-                rustix::fs::OFlags::NOFOLLOW
-            }
-        };
-            
-        let fd = rustix::fs::openat(parent_fd, path_rel, oflags, rustix::fs::Mode::all()).unwrap();
-        let file = std::fs::File::from(fd);
-        let metadata = file.metadata().unwrap();
-        let fd = rustix::fd::OwnedFd::from(file);
-        let dir = {
-            if metadata.is_dir() {
-                Some(rustix::fs::Dir::read_from(&fd).unwrap())
-            } else {
-                None
+                rustix::fs::AtFlags::SYMLINK_NOFOLLOW
             }
         };
 
+        //println!("opening {}", path.display());            
+        //std::thread::sleep(std::time::Duration::from_millis(10000));
+        let stat = rustix::fs::statat(parent_fd, path_rel, atflags).unwrap();
+        let is_dir = rustix::fs::FileType::from_raw_mode(stat.st_mode as rustix::fs::RawMode) == rustix::fs::FileType::Directory;
+
+        // TODO: only open if is directory
+        let fd;
+        let dir;
+
+        if is_dir {
+            fd = Some(rustix::fs::openat(parent_fd, path_rel, oflags, rustix::fs::Mode::empty()).unwrap());
+            dir = Some(rustix::fs::Dir::read_from(fd.as_ref().unwrap()).unwrap());
+        } else {
+            fd = None;
+            dir = None;
+        }
+
+        // NOTE: processing of Stat mostly taken from:
+        // https://github.com/bytecodealliance/cap-std/blob/dcead54dba1ae9f519d2a7c0e91713549d44f3fa/cap-primitives/src/rustix/fs/metadata_ext.rs#L104
+        // TODO: potentially take all of this stat processing and abstract it behind a custom struct for Unix-like platform metadata
+
         let file_info = FileInfo {
-            file_id: metadata.ino() as u128,
-            dev_id: metadata.dev(),
+            file_id: stat.st_ino as u128,
+            dev_id: stat.st_dev,
         };
 
         Ok(Self {
             path: path.to_path_buf(),
-            is_dir: metadata.is_dir(),
-            size: if metadata.is_dir() { 0 } else { metadata.len() },
-            blocks: metadata.blocks(),
+            is_dir: is_dir,
+            size: if is_dir { 0 } else { u64::try_from(stat.st_size).unwrap() },
+            blocks: u64::try_from(stat.st_blocks).unwrap(),
             inodes: 1,
             inode: Some(file_info),
-            created: birth_u64(&metadata),
-            accessed: metadata.atime() as u64,
-            modified: metadata.mtime() as u64,
+            // TODO: figure out how to actually get birth time (look at std::fs::Metadata implementation)
+            created: birth_u64(&stat),
+            // TODO: update this to get the birthtime data using `Statx`
+            //created: None,
+            accessed: stat.st_atime as u64,
+            modified: stat.st_mtime as u64,
             dir: dir,
             fd: fd,
         })
@@ -275,12 +296,41 @@ fn windows_creation_time_to_unix_time(win_time: u64) -> Option<u64> {
     (win_time / 10_000_000).checked_sub(11_644_473_600)
 }
 
+// TODO: figure out how to actually make this work
+// taken from https://github.com/bytecodealliance/cap-std/blob/dcead54dba1ae9f519d2a7c0e91713549d44f3fa/cap-primitives/src/rustix/fs/metadata_ext.rs#L290
 #[cfg(not(windows))]
-fn birth_u64(meta: &Metadata) -> Option<u64> {
-    meta.created()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|e| e.as_secs())
+fn system_time_from_rustix(sec: i64, nsec: u64) -> Option<std::time::SystemTime> {
+    if sec >= 0 {
+        UNIX_EPOCH.checked_add(Duration::new(u64::try_from(sec).unwrap(), nsec as _))
+    } else {
+        UNIX_EPOCH
+            .checked_sub(Duration::new(u64::try_from(-sec).unwrap(), 0))
+            .map(|t| t.checked_add(Duration::new(0, nsec as u32)))
+            .flatten()
+    }
+}
+
+#[cfg(not(windows))]
+fn birth_u64(stat: &rustix::fs::Stat) -> Option<u64> {
+    #[cfg(any(
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "macos",
+        target_os = "ios"
+    ))]
+    {
+        system_time_from_rustix(
+                stat.st_birthtime.try_into().unwrap(),
+                stat.st_birthtime_nsec as _,
+            )
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|e| e.as_secs())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        None
+    }
 }
 
 #[cfg(windows)]
@@ -392,7 +442,7 @@ fn du(
 
     'file_loop: for f in read {
         match f {
-            Ok(path) => match Stat::new(&path, path.file_name().unwrap().as_ref(), &my_stat.fd, options) {
+            Ok(path) => match Stat::new(&path, path.file_name().unwrap().as_ref(), my_stat.fd.as_ref().unwrap(), options) {
                 // TODO: make sure we don't use full path ever when retrieving file metadata?
                 //   might need to update Stat::new
                 Ok(this_stat) => {

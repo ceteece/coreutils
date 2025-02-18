@@ -18,6 +18,13 @@
   - refactor to get actually decent performance
     - don't open files unless they are directories, otherwise just stat them (using `statat`) to get their metadata without opening
 
+- okay, seems like separating stat and open (and only opening when we actually have a directory) is going to be essential to passing the symlink tests
+  - this gets a bit tricky, because now we have to handle processing the stat result ourselves, instead of using the convenient `Metadata` data type
+    - this gets kind of ugly, need to basically copy a lot of code from `cap-std` to see how they process the stat result
+    - also a bit annoying because there is some platform-dependent variation,
+      - for example, most Unix-like platforms have an `st_birthtime` field we can use, but for Linux I think we can only get this information from `Statx`, which requires a separate code path:
+        - https://github.com/bytecodealliance/cap-std/blob/dcead54dba1ae9f519d2a7c0e91713549d44f3fa/cap-primitives/src/rustix/fs/stat_unchecked.rs#L33
+        - probably also worth checking how Rust standard library implementation of `Metadata` handles this difference...
 
 ===============================
 - okay, I think I've got a decent general plan for handling the rest of this:
